@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<title>记账本</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#F7F8F6">
+<meta name="color-scheme" content="light dark">
+
+<!-- 加到 iOS 主屏幕后，用独立窗口全屏运行 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="记账本">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="stage">
+  <div class="phone" id="phone">
+    <header class="topbar" id="topbar"></header>
+    <main class="view" id="view" tabindex="-1"></main>
+    <nav class="tabbar" id="tabbar"></nav>
+  </div>
+</div>
+
+<div class="overlay" id="overlay" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="icons.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
