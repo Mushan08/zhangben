@@ -1,6 +1,6 @@
 /* 离线缓存：应用本身完全静态，所以缓存优先即可。
    改动前端文件后，把 CACHE 的版本号 +1 就能让所有设备换到新版本。 */
-var CACHE = 'mozhang-v2';
+var CACHE = 'mozhang-v3';
 
 var ASSETS = [
   './',
@@ -51,12 +51,7 @@ self.addEventListener('fetch', function (e) {
           caches.open(CACHE).then(function (c) { c.put(req, copy); });
         }
         return resp;
-      }).catch(function () {
-        // 只有页面导航才回退到首页；脚本、字体拿不到就该老老实实失败，
-        // 否则浏览器会把一段 HTML 当 JS 或字体去解析。
-        if (req.mode === 'navigate') return caches.match('./index.html');
-        return Response.error();
-      });
+      }).catch(function () { return caches.match('./index.html'); });
     })
   );
 });

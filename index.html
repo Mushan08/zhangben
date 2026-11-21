@@ -7,6 +7,32 @@
 <meta name="theme-color" content="#F7F8F6">
 <meta name="color-scheme" content="light dark">
 
+<!-- 首帧前就把主题/字体设好，避免暗色或大字号下闪一下默认样式 -->
+<script>
+(function () {
+  try {
+    var d = JSON.parse(localStorage.getItem('mozhang.v2') || 'null');
+    var s = (d && d.settings) || {};
+    var dark = s.theme === 'dark' ||
+      (s.theme !== 'light' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+    var h = document.documentElement;
+    h.setAttribute('data-theme', dark ? 'dark' : 'light');
+    if (s.accent) h.setAttribute('data-accent', s.accent);
+    if (s.font) h.setAttribute('data-font', s.font);
+    if (s.fontScale) h.style.setProperty('--fsz', String(s.fontScale));
+    var BG = {
+      cinnabar: dark ? '#0F1211' : '#F7F8F6',
+      jade:     dark ? '#0C1410' : '#EFF5EF',
+      indigo:   dark ? '#0D1119' : '#F0F3F9',
+      violet:   dark ? '#120F18' : '#F5F3F9',
+      amber:    dark ? '#14100A' : '#F8F2E6'
+    };
+    var m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute('content', BG[s.accent] || BG.cinnabar);
+  } catch (e) { /* 首帧脚本失败就交给 app.js 兜底 */ }
+})();
+</script>
+
 <!-- 加到 iOS 主屏幕后，用独立窗口全屏运行 -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -28,7 +54,7 @@
 </div>
 
 <div class="overlay" id="overlay" hidden></div>
-<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="toast" id="toast" hidden></div>
 
 <script src="icons.js"></script>
 <script src="app.js"></script>

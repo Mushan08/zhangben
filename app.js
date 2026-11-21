@@ -89,14 +89,18 @@
     return l ? l.name : '账本';
   }
   function activeLedger() { return DB.currentLedger || (DB.ledgers[0] && DB.ledgers[0].id); }
-  function activeLedgerObj() {
-    var id = activeLedger();
-    return DB.ledgers.filter(function (l) { return l.id === id; })[0] || DB.ledgers[0];
-  }
-  /* 预算跟着账本走：旅行账本的额度不该占用日常账本那一份 */
-  function budgetCents() { var l = activeLedgerObj(); return (l && l.budget) || 0; }
 
   /* ---------- 默认数据 ---------- */
+  var SETTING_DEFAULTS = {
+    theme: 'auto',        // light / dark / auto
+    accent: 'cinnabar',   // 主题：cinnabar / jade / indigo / violet / amber（整套配色）
+    font: 'sans',         // 字体：sans / system / serif / kai / mono（数字一起换）
+    fontScale: 1,         // 字号：0.92 / 1 / 1.08 / 1.16
+    currency: '¥',
+    budget: 0,
+    autoSave: true,       // 每天自动备份一次 JSON
+    lastAutoSave: ''      // 上次自动备份的日期（YYYY-MM-DD）
+  };
   function buildDefaults() {
     var cats = [], i;
     for (i = 0; i < EXPENSE_CATS.length; i++) {
@@ -105,10 +109,10 @@
     for (i = 0; i < INCOME_CATS.length; i++) {
       cats.push({ id: 'i' + (i + 1), name: INCOME_CATS[i][0], icon: INCOME_CATS[i][1], color: PALETTE[(i * 3 + 5) % PALETTE.length], kind: 'income', order: i });
     }
-    return {
+    return normalizeDB({
       version: 1,
-      settings: { theme: 'auto', currency: '¥' },
-      ledgers: [{ id: 'ld1', name: '日常账本', budget: 0 }],
+      settings: {},
+      ledgers: [{ id: 'ld1', name: '日常账本' }],
       currentLedger: 'ld1',
       accounts: [
         { id: 'a1', name: '现金', type: '现金', icon: 'cash', color: '#8A9440', initial: 0 },
@@ -118,77 +122,71 @@
       ],
       categories: cats,
       txns: []
-    };
+    });
+  }
+
+  /* 旧备份 / 旧版本数据缺字段时在这里补齐，保证升级后设置不丢 */
+  function normalizeDB(d) {
+    if (!d.settings) d.settings = {};
+    for (var k in SETTING_DEFAULTS) {
+      if (d.settings[k] == null) d.settings[k] = SETTING_DEFAULTS[k];
+    }
+    d.ledgers = d.ledgers && d.ledgers.length ? d.ledgers : [{ id: 'ld1', name: '日常账本' }];
+    d.currentLedger = d.currentLedger || d.ledgers[0].id;
+    d.txns = Array.isArray(d.txns) ? d.txns : [];
+    d.accounts = Array.isArray(d.accounts) ? d.accounts : [];
+    d.categories = Array.isArray(d.categories) ? d.categories : [];
+    return d;
   }
 
   /* ---------- 存取 ---------- */
-  var KEY_UNREADABLE = 'mozhang.v2.unreadable';
-
-  /* 把外部来的数据补齐成可用状态。load 与「从备份恢复」共用这一条路径，
-     所以导入一份缺字段的 JSON 不会再让界面崩在后续读取上。 */
-  function normalizeData(d) {
-    if (!d || typeof d !== 'object') throw new Error('不是有效的备份文件');
-    if (!Array.isArray(d.categories)) throw new Error('缺少分类列表');
-    if (!Array.isArray(d.txns)) throw new Error('缺少流水列表');
-    d.version = d.version || 1;
-    d.settings = d.settings || {};
-    if (!d.settings.theme) d.settings.theme = 'auto';
-    if (!d.settings.currency) d.settings.currency = '¥';
-    d.ledgers = (d.ledgers && d.ledgers.length) ? d.ledgers : [{ id: 'ld1', name: '日常账本' }];
-    d.currentLedger = d.currentLedger || d.ledgers[0].id;
-    d.accounts = d.accounts || [];
-    migrateBudget(d);
-    return d;
-  }
-  /* 预算原本存在 settings 里，所有账本共用一份；现在改成每个账本各一份。
-     旧的单一预算归给它当时的那个账本，settings 里不再保留。 */
-  function migrateBudget(d) {
-    var legacy = typeof d.settings.budget === 'number' ? d.settings.budget : 0;
-    var hasOwn = d.ledgers.some(function (l) { return typeof l.budget === 'number'; });
-    if (legacy > 0 && !hasOwn) {
-      d.ledgers.forEach(function (l) { if (l.id === d.currentLedger) l.budget = legacy; });
-    }
-    delete d.settings.budget;
-  }
   function load() {
     var raw = null;
     try { raw = localStorage.getItem(KEY); } catch (e) { raw = null; }
-    if (!raw) { DB = buildDefaults(); save(); return true; }
+    if (!raw) { DB = buildDefaults(); save(); return; }
     try {
-      DB = normalizeData(JSON.parse(raw));
-      save();
-      return true;
+      var d = JSON.parse(raw);
+      if (!d || !Array.isArray(d.categories) || !d.categories.length) throw new Error('bad');
+      DB = normalizeDB(d);
     } catch (e) {
-      /* 读不出来时先把原始串留一份：紧接着的 save() 会写入默认数据，
-         不留这一份的话原数据就永远没了。 */
-      try {
-        if (!localStorage.getItem(KEY_UNREADABLE)) localStorage.setItem(KEY_UNREADABLE, raw);
-      } catch (x) { /* 存储也不可用就算了 */ }
       DB = buildDefaults();
-      save();
-      return false;
     }
+    save();
   }
   function save() {
-    try { localStorage.setItem(KEY, JSON.stringify(DB)); return true; }
-    catch (e) { return false; }
+    try { localStorage.setItem(KEY, JSON.stringify(DB)); } catch (e) { /* 忽略配额错误 */ }
   }
-  /* 关键写入点用它：写不进去必须说出来，不能让人以为账已经记上了 */
-  function saveOrWarn() {
-    if (save()) return true;
-    toast('保存失败：本机存储已满，先导出备份再清理');
-    return false;
+  /* 数据变更统一走 commit：写盘 + 失效缓存 + 排自动备份 */
+  var rev = 0;
+  var dirty = false;   // 本会话是否有变更；防止陈旧标签页把旧数据写回磁盘
+  function commit() {
+    save();
+    rev++;
+    dirty = true;
+    scheduleAutoSave();
   }
 
-  /* ---------- 派生计算 ---------- */
+  /* ---------- 派生计算 ----------
+     渲染路径上 ledgerTxns / monthTxns / 余额会被反复调用，
+     这里按数据版本 rev 做一层 memo，同一轮渲染只算一遍。 */
+  var memoLedger = { rev: -1, ledger: null, list: null };
+  var memoMonth = { rev: -1, ledger: null, month: null, list: null };
+  var memoBal = { rev: -1, ledger: null, map: null };
   function inMonth(t, k) { return mk(t.date) === k; }
   function ledgerTxns() {
     var ld = activeLedger();
-    return DB.txns.filter(function (t) { return (t.ledger || 'ld1') === ld; });
+    if (memoLedger.rev === rev && memoLedger.ledger === ld) return memoLedger.list;
+    var list = DB.txns.filter(function (t) { return (t.ledger || 'ld1') === ld; });
+    memoLedger = { rev: rev, ledger: ld, list: list };
+    return list;
   }
   function monthTxns(k) {
-    return ledgerTxns().filter(function (t) { return inMonth(t, k); })
+    var ld = activeLedger();
+    if (memoMonth.rev === rev && memoMonth.ledger === ld && memoMonth.month === k) return memoMonth.list;
+    var list = ledgerTxns().filter(function (t) { return inMonth(t, k); })
       .sort(function (a, b) { return (b.date + b.time) < (a.date + a.time) ? -1 : 1; });
+    memoMonth = { rev: rev, ledger: ld, month: k, list: list };
+    return list;
   }
   function totals(list) {
     var inc = 0, exp = 0;
@@ -208,23 +206,32 @@
     out.sort(function (a, b) { return b.amount - a.amount; });
     return out;
   }
-  function accountBalance(id) {
-    var bal = 0, a = acct(id);
-    bal += (a.initial || 0);
+  /* 所有账户余额一次遍历算完，避免逐账户全表扫描 */
+  function balances() {
+    var ld = activeLedger();
+    if (memoBal.rev === rev && memoBal.ledger === ld) return memoBal.map;
+    var map = {};
+    DB.accounts.forEach(function (a) { map[a.id] = a.initial || 0; });
     ledgerTxns().forEach(function (t) {
-      if (t.type === 'income' && t.account === id) bal += t.amount;
-      else if (t.type === 'expense' && t.account === id) bal -= t.amount;
+      if (t.type === 'income') map[t.account] = (map[t.account] || 0) + t.amount;
+      else if (t.type === 'expense') map[t.account] = (map[t.account] || 0) - t.amount;
       else if (t.type === 'transfer') {
-        if (t.account === id) bal -= t.amount;
-        if (t.toAccount === id) bal += t.amount;
+        map[t.account] = (map[t.account] || 0) - t.amount;
+        map[t.toAccount] = (map[t.toAccount] || 0) + t.amount;
       }
     });
-    return bal;
+    memoBal = { rev: rev, ledger: ld, map: map };
+    return map;
+  }
+  function accountBalance(id) {
+    var a = acct(id);
+    var map = balances();
+    return map[id] != null ? map[id] : (a.initial || 0);
   }
   function monthSeries(k, n) {
-    var out = [], i;
+    var out = [], i, all = ledgerTxns();
     for (i = n - 1; i >= 0; i--) {
-      var key = shiftMonth(k, -i), tt = totals(ledgerTxns().filter(function (t) { return inMonth(t, key); }));
+      var key = shiftMonth(k, -i), tt = totals(all.filter(function (t) { return inMonth(t, key); }));
       out.push({ key: key, label: monthShort(key), inc: tt.inc, exp: tt.exp });
     }
     return out;
@@ -249,13 +256,32 @@
     } catch (e) { /* 浏览器环境 */ }
     return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
   }
+  /* 每套主题的纸面底色（浅 / 深），与 styles.css 各主题的 --bg 一一对应 */
+  var ACCENT_BG = {
+    cinnabar: { light: '#F7F8F6', dark: '#0F1211' },
+    jade:     { light: '#EFF5EF', dark: '#0C1410' },
+    indigo:   { light: '#F0F3F9', dark: '#0D1119' },
+    violet:   { light: '#F5F3F9', dark: '#120F18' },
+    amber:    { light: '#F8F2E6', dark: '#14100A' }
+  };
   function applyTheme() {
-    var t = DB.settings.theme || 'auto';
+    var s = DB.settings;
+    var t = s.theme || 'auto';
     var dark = t === 'dark' || (t === 'auto' && systemDark());
-    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    var root = document.documentElement;
+    root.setAttribute('data-theme', dark ? 'dark' : 'light');
+    var accent = ACCENT_BG[s.accent] ? s.accent : 'cinnabar';
+    root.setAttribute('data-accent', accent);
     var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', dark ? '#0F1211' : '#F7F8F6');
+    if (meta) meta.setAttribute('content', ACCENT_BG[accent][dark ? 'dark' : 'light']);
     try { if (window.Android && window.Android.setChrome) window.Android.setChrome(dark); } catch (e) { /* noop */ }
+  }
+  function applyFont() {
+    var root = document.documentElement;
+    var f = DB.settings.font || 'sans';
+    root.setAttribute('data-font', f);
+    var sc = +DB.settings.fontScale || 1;
+    root.style.setProperty('--fsz', sc);
   }
 
   /* ---------- 片段 ---------- */
@@ -346,13 +372,12 @@
 
     var cur = esc(DB.settings.currency);
     var budgetHtml = '';
-    var budget = budgetCents();
-    if (budget > 0) {
-      var pct = Math.min(100, Math.round(tt.exp / budget * 100));
-      var over = tt.exp > budget;
+    if (DB.settings.budget > 0) {
+      var pct = Math.min(100, Math.round(tt.exp / DB.settings.budget * 100));
+      var over = tt.exp > DB.settings.budget;
       budgetHtml = '<div class="sum-budget' + (over ? ' is-over' : '') + '">' +
-        '<div class="sb-head"><span>月度预算 ' + cur + ' ' + fmt(budget) + '</span>' +
-        '<b>' + pct + '%' + (over ? ' · 超 ' + fmt(tt.exp - budget) : '') + '</b></div>' +
+        '<div class="sb-head"><span>月度预算 ' + cur + ' ' + fmt(DB.settings.budget) + '</span>' +
+        '<b>' + pct + '%' + (over ? ' · 超 ' + fmt(tt.exp - DB.settings.budget) : '') + '</b></div>' +
         '<span class="track' + (over ? ' is-over' : '') + '"><i style="width:' + pct + '%"></i></span></div>';
     }
 
@@ -505,6 +530,12 @@
   }
 
   /* ---------- 设置 ---------- */
+  var ACCENTS = [
+    ['cinnabar', '朱砂'], ['jade', '松绿'], ['indigo', '黛蓝'], ['violet', '紫棠'], ['amber', '琥珀']
+  ];
+  var ACCENT_SWATCH = { cinnabar: '#C24A32', jade: '#1E7A5F', indigo: '#2D5FA8', violet: '#7D4E9F', amber: '#B07414' };
+  var FONTS = [['sans', '默认'], ['system', '系统'], ['serif', '宋体'], ['kai', '楷体'], ['mono', '等宽']];
+  var FONT_SCALES = [[0.92, '小'], [1, '标准'], [1.08, '大'], [1.16, '特大']];
   function viewSettings() {
     var s = DB.settings;
     return '' +
@@ -516,6 +547,21 @@
           '<button data-act="theme" data-v="dark" class="' + (s.theme === 'dark' ? 'is-on' : '') + '">深色</button>' +
           '<button data-act="theme" data-v="auto" class="' + (s.theme === 'auto' ? 'is-on' : '') + '">跟随</button>' +
         '</span></div>' +
+      '<div class="item"><span class="il"><span class="iname">配色</span>' +
+        '<span class="isub">整套纸面色随主题更换</span></span>' +
+        '<span class="swatches">' + ACCENTS.map(function (a) {
+          return '<button class="swatch' + (s.accent === a[0] ? ' is-on' : '') + '" data-act="accent" data-v="' + a[0] +
+            '" title="' + a[1] + '" style="background:' + ACCENT_SWATCH[a[0]] + '"></button>';
+        }).join('') + '</span></div>' +
+      '<div class="item"><span class="il"><span class="iname">字体</span>' +
+        '<span class="isub">正文与数字一起换，宋体楷体看设备字库</span></span>' +
+        '<span class="seg-mini seg-wrap">' + FONTS.map(function (f) {
+          return '<button data-act="font" data-v="' + f[0] + '" class="' + (s.font === f[0] ? 'is-on' : '') + '">' + f[1] + '</button>';
+        }).join('') + '</span></div>' +
+      '<div class="item"><span class="il"><span class="iname">字号</span></span>' +
+        '<span class="seg-mini">' + FONT_SCALES.map(function (f) {
+          return '<button data-act="fontscale" data-v="' + f[0] + '" class="' + ((+s.fontScale || 1) === f[0] ? 'is-on' : '') + '">' + f[1] + '</button>';
+        }).join('') + '</span></div>' +
       '<div class="item"><span class="il"><span class="iname">货币符号</span></span>' +
         '<span class="seg-mini">' +
           ['¥', '$', '€', '£'].map(function (c) {
@@ -528,27 +574,24 @@
       item('ledger', '账本', '当前：' + ledgerName(activeLedger()), 'ledgers', DB.ledgers.length + ' 个') +
       item('tag', '分类管理', '新增、改名、换色与图标', 'categories', '') +
       item('wallet', '账户管理', '现金、银行卡、电子钱包', 'accounts', '') +
-      item('target', '月度预算', budgetCents() > 0 ? esc(s.currency) + ' ' + fmt(budgetCents()) : '未设置', 'budget', '') +
+      item('target', '月度预算', s.budget > 0 ? esc(s.currency) + ' ' + fmt(s.budget) : '未设置', 'budget', '') +
     '</div>' +
 
     '<div class="group"><div class="group-title">数据</div>' +
-      item('download', '导出 CSV', '可用 Excel 或表格软件打开', 'export-csv', '', false, true) +
-      item('file', '备份为 JSON', '完整保留分类、账户与流水', 'export-json', '', false, true) +
-      item('reset', '从备份恢复', '选择之前导出的 JSON 文件', 'import', '', false, true) +
-      item('ledger', '载入示例数据', '清除现有记录并填入演示账目', 'demo', '', false, true) +
-      item('trash', '清空所有数据', '删除全部流水，保留分类与账户', 'clear-txns', '', true, true) +
+      item('reset', '自动备份', (s.autoSave ? '已开启' : '已关闭') + (s.lastAutoSave ? ' · 上次 ' + s.lastAutoSave : ''), 'auto-backup', '') +
+      item('download', '导出 CSV', '可用 Excel 或表格软件打开', 'export-csv', '') +
+      item('file', '备份为 JSON', '完整保留分类、账户与流水', 'export-json', '') +
+      item('reset', '从备份恢复', '选择之前导出的 JSON 文件', 'import', '') +
+      item('ledger', '载入示例数据', '清除现有记录并填入演示账目', 'demo', '') +
+      item('trash', '清空所有数据', '删除全部流水，保留分类与账户', 'clear-txns', '', true) +
     '</div>' +
 
     '<div class="group"><div class="group-title">关于</div>' +
       item('info', '记账本', '版本 ' + APP_VERSION + ' · 本地优先，数据不出设备', 'about', '') +
     '</div>';
   }
-  /* 设置页的条目。默认是点开一个面板（data-panel）；isAction 为真时
-     表示这一条直接触发一个动作（data-act），没有对应的面板。
-     之前这两种混在一个写法里，五个数据功能因此全部点不动。 */
-  function item(icon, name, sub, kind, val, danger, isAction) {
-    return '<button class="item' + (danger ? ' is-danger' : '') + '"' +
-      (isAction ? ' data-act="' + kind + '"' : ' data-act="panel" data-panel="' + kind + '"') + '>' +
+  function item(icon, name, sub, panel, val, danger) {
+    return '<button class="item' + (danger ? ' is-danger' : '') + '" data-act="panel" data-panel="' + panel + '">' +
       '<span class="fico" style="color:var(--ink-3)">' + ICON(icon, 19) + '</span>' +
       '<span class="il"><span class="iname">' + esc(name) + '</span>' +
       (sub ? '<span class="isub">' + esc(sub) + '</span>' : '') + '</span>' +
@@ -640,12 +683,7 @@
     if (ov) {
       ov.classList.remove('is-in');
       var o = ov;
-      setTimeout(function () {
-        /* 遮罩要等淡出才隐藏，这 200ms 里可能已经打开了别的面板，
-           那就别把这个新面板一起抹掉。 */
-        if (UI.panel) return;
-        o.hidden = true; o.innerHTML = '';
-      }, 200);
+      setTimeout(function () { o.hidden = true; o.innerHTML = ''; }, 200);
     }
     render();
   }
@@ -653,10 +691,10 @@
   function setPanel(name) { UI.stack = []; UI.panel = name; render(); }
   function renderPanel() {
     ov = document.getElementById('overlay');
-    var html = '';
+    var html = '', wide = false;
     if (UI.panel === 'compose') html = panelCompose();
     else if (UI.panel === 'picker') html = panelPicker();
-    else if (UI.panel === 'confirm') html = panelConfirm();
+    else if (UI.panel === 'confirm') { html = panelConfirm(); wide = true; }
     else if (UI.panel === 'search') html = panelSearch();
     else if (UI.panel === 'categories') html = panelCategories();
     else if (UI.panel === 'ledgers') html = panelLedgers();
@@ -666,13 +704,7 @@
     else if (UI.panel === 'cat-drill') html = panelCatDrill();
     else if (UI.panel === 'acct-edit') html = panelAccountEdit();
     else if (UI.panel === 'cat-edit') html = panelCategoryEdit();
-    /* 兜底：万一某个动作没接上面板，宁可不开，也别弹一个空白遮罩 */
-    if (!html) {
-      UI.panel = null;
-      ov.hidden = true;
-      ov.innerHTML = '';
-      return;
-    }
+    else if (UI.panel === 'auto-backup') html = panelAutoBackup();
     ov.hidden = false;
     ov.innerHTML = html;
     requestAnimationFrame(function () { ov.classList.add('is-in'); });
@@ -685,19 +717,16 @@
       '<h2>' + esc(title) + '</h2>' + (right || '') + '</div>';
   }
   function panelShell(title, bodyHtml, footHtml, cls) {
-    return '<div class="panel' + (cls ? ' ' + cls : '') + '" role="dialog" aria-modal="true" aria-label="' + esc(title) + '">' +
-      panelHead(title) +
+    return '<div class="panel' + (cls ? ' ' + cls : '') + '">' + panelHead(title) +
       '<div class="panel-body">' + bodyHtml + '</div>' +
       (footHtml ? '<div class="panel-foot">' + footHtml + '</div>' : '') + '</div>';
   }
   function panelConfirm() {
     var c = UI.confirm || { title: '', text: '', ok: '确定', onOk: function () {} };
-    /* 删除、清空这类操作用 is-danger 把标题染成朱砂，和普通确认区分开 */
-    return '<div class="dialog' + (c.danger ? ' is-danger' : '') + '" role="dialog" aria-modal="true" aria-label="' + esc(c.title) + '">' +
-      '<h3>' + esc(c.title) + '</h3><p>' + esc(c.text) + '</p>' +
+    return '<div class="dialog"><h3>' + esc(c.title) + '</h3><p>' + esc(c.text) + '</p>' +
       '<div class="dialog-actions">' +
         '<button class="btn btn--ghost" data-act="close">取消</button>' +
-        '<button class="btn btn--primary" data-act="confirm-ok">' + esc(c.ok) + '</button>' +
+        '<button class="btn ' + (c.danger ? 'btn--warn' : 'btn--primary') + '" data-act="confirm-ok">' + esc(c.ok) + '</button>' +
       '</div></div>';
   }
 
@@ -723,7 +752,7 @@
       }).join('') + '</div>' +
       '<div class="amount-box">' +
         '<div class="amount-line"><span class="cur">' + esc(DB.settings.currency) + '</span>' +
-        (d.amountStr ? '<span>' + d.amountStr + '</span>' : '') +
+        (d.amountStr ? '<span class="amt-str">' + d.amountStr + '</span>' : '') +
         '<span class="caret"></span></div>' +
         '<div class="amount-hint">' + (d.amountStr
           ? (isT ? '账户之间转移，不计入收支' : d.typeDraft === 'income' ? '记一笔收入' : '记一笔支出')
@@ -766,14 +795,14 @@
     body += '</div>';
 
     var foot = '<div class="keypad">' +
-      key('1') + key('2') + key('3') + '<button class="key key--fn" data-act="key-back" title="退格" aria-label="退格">' + ICON('backspace', 21) + '</button>' +
+      key('1') + key('2') + key('3') + '<button class="key key--fn" data-act="key-back">' + ICON('backspace', 21) + '</button>' +
       key('4') + key('5') + key('6') + key('7') +
-      key('8') + key('9') + key('.') + '<button class="key key--ok" data-act="save" title="保存" aria-label="保存">' + ICON('check', 24) + '</button>' +
+      key('8') + key('9') + key('.') + '<button class="key key--ok" data-act="save">' + ICON('check', 24) + '</button>' +
       '<button class="key key--fn" style="grid-column:span 2" data-act="key-clear">清零</button>' +
       key('0') +
     '</div>';
 
-    return '<div class="panel panel--compose" role="dialog" aria-modal="true" aria-label="' + (d.id ? '编辑记录' : '记一笔') + '">' +
+    return '<div class="panel panel--compose">' +
       panelHead(d.id ? '编辑记录' : '记一笔') +
       '<div class="compose-top">' + top + '</div>' +
       '<div class="panel-body">' + body + '</div>' +
@@ -817,8 +846,8 @@
         return '<div class="item"><span class="il"><span class="iname">' + esc(l.name) + '</span>' +
           '<span class="isub">' + ledgerTxnsOf(l.id).length + ' 笔记录</span></span>' +
           (on ? '<span class="ival" style="color:var(--accent)">' + ICON('check', 18) + '</span>' :
-                '<button class="iconbtn" data-act="switch-ledger" data-id="' + l.id + '" title="切换到该账本" aria-label="切换到该账本">' + ICON('next', 17) + '</button>') +
-          (DB.ledgers.length > 1 ? '<button class="iconbtn" data-act="del-ledger" data-id="' + l.id + '" title="删除账本" aria-label="删除账本">' + ICON('trash', 17) + '</button>' : '') +
+                '<button class="iconbtn" data-act="switch-ledger" data-id="' + l.id + '">' + ICON('next', 17) + '</button>') +
+          (DB.ledgers.length > 1 ? '<button class="iconbtn" data-act="del-ledger" data-id="' + l.id + '">' + ICON('trash', 17) + '</button>' : '') +
         '</div>';
       }).join('');
       return panelShell('选择账本', lb);
@@ -841,9 +870,9 @@
     }
     return '<div class="cal">' +
       '<div class="cal-head">' +
-        '<button class="iconbtn" data-act="cal-shift" data-n="-1" title="上个月" aria-label="上个月">' + ICON('back', 18) + '</button>' +
+        '<button class="iconbtn" data-act="cal-shift" data-n="-1">' + ICON('back', 18) + '</button>' +
         '<b class="cal-title">' + y + '年' + m + '月</b>' +
-        '<button class="iconbtn" data-act="cal-shift" data-n="1" title="下个月" aria-label="下个月">' + ICON('next', 18) + '</button>' +
+        '<button class="iconbtn" data-act="cal-shift" data-n="1">' + ICON('next', 18) + '</button>' +
       '</div>' +
       '<div class="cal-dow">' + ['一', '二', '三', '四', '五', '六', '日'].map(function (d) { return '<span>' + d + '</span>'; }).join('') + '</div>' +
       '<div class="cal-grid">' + cells + '</div>' +
@@ -852,25 +881,18 @@
   }
 
   /* ---------- 搜索 ---------- */
-  var SEARCH_MAX = 200;
-  function searchHits() {
+  function searchResultsHtml() {
     var q = (UI.search || '').trim();
-    return ledgerTxns().filter(function (t) {
+    var list = ledgerTxns().filter(function (t) {
       if (!q) return true;
       var c = cat(t.category);
       var hay = [c.name, t.note, acct(t.account).name, fmt(t.amount)].join(' ');
       return hay.toLowerCase().indexOf(q.toLowerCase()) >= 0;
-    }).sort(function (a, b) { return (b.date + b.time) < (a.date + a.time) ? -1 : 1; }).slice(0, SEARCH_MAX);
-  }
-  function searchResultsHtml() {
-    var q = (UI.search || '').trim(), list = searchHits();
-    if (!list.length) {
-      return emptyState('search', q ? '没有匹配的记录' : '输入关键词开始搜索',
-        q ? '换个说法试试，比如分类名或备注里的词。' : '可以搜备注、分类、账户，也可以直接搜金额。');
-    }
-    return '<div>' + list.map(function (t) { return txnRow(t); }).join('') + '</div>' +
-      (list.length >= SEARCH_MAX
-        ? '<p class="hint-more">只列出前 ' + SEARCH_MAX + ' 条，再输入几个字缩小范围。</p>' : '');
+    }).sort(function (a, b) { return (b.date + b.time) < (a.date + a.time) ? -1 : 1; }).slice(0, 200);
+    return list.length
+      ? '<div>' + list.map(function (t) { return txnRow(t); }).join('') + '</div>'
+      : emptyState('search', q ? '没有匹配的记录' : '输入关键词开始搜索',
+          q ? '换个说法试试，比如分类名或备注里的词。' : '可以搜备注、分类、账户，也可以直接搜金额。');
   }
   function panelSearch() {
     var q = (UI.search || '').trim();
@@ -891,7 +913,7 @@
         cats.map(function (c) {
           return '<div class="item"><span class="fico" style="color:' + c.color + '">' + ICON(c.icon, 19) + '</span>' +
             '<span class="il"><span class="iname">' + esc(c.name) + '</span></span>' +
-            '<button class="iconbtn" data-act="cat-edit" data-id="' + c.id + '" title="编辑分类" aria-label="编辑分类">' + ICON('edit', 17) + '</button></div>';
+            '<button class="iconbtn" data-act="cat-edit" data-id="' + c.id + '">' + ICON('edit', 17) + '</button></div>';
         }).join('');
     }).join('');
     return panelShell('分类管理', body,
@@ -935,7 +957,7 @@
           '<span class="iname">' + esc(l.name) + '</span>' +
           '<span class="isub">' + ledgerTxnsOf(l.id).length + ' 笔' + (on ? ' · 当前账本' : '') + '</span></button>' +
         (on ? '<span class="ival" style="color:var(--accent)">' + ICON('check', 18) + '</span>' : '') +
-        (DB.ledgers.length > 1 ? '<button class="iconbtn" data-act="del-ledger" data-id="' + l.id + '" title="删除账本" aria-label="删除账本">' + ICON('trash', 17) + '</button>' : '') +
+        (DB.ledgers.length > 1 ? '<button class="iconbtn" data-act="del-ledger" data-id="' + l.id + '">' + ICON('trash', 17) + '</button>' : '') +
       '</div>';
     }).join('');
     body += '<div style="margin-top:22px"><div class="group-title">新建账本</div>' +
@@ -956,9 +978,9 @@
       cells += '<button class="' + cls + '" data-act="pick-month" data-v="' + k + '">' + pad2(i) + ' 月</button>';
     }
     var body = '<div class="mp-year">' +
-      '<button class="iconbtn" data-act="mp-year" data-n="-1" title="上一年" aria-label="上一年">' + ICON('back', 18) + '</button>' +
+      '<button class="iconbtn" data-act="mp-year" data-n="-1">' + ICON('back', 18) + '</button>' +
       '<b>' + y + '</b>' +
-      '<button class="iconbtn" data-act="mp-year" data-n="1" title="下一年" aria-label="下一年">' + ICON('next', 18) + '</button>' +
+      '<button class="iconbtn" data-act="mp-year" data-n="1">' + ICON('next', 18) + '</button>' +
     '</div><div class="mp-grid">' + cells + '</div>' +
     '<div class="mp-quick">' +
       '<button class="btn btn--ghost" data-act="pick-month" data-v="' + nowKey + '" style="flex:1">回到本月</button>' +
@@ -983,7 +1005,7 @@
   function panelBudget() {
     var body = '<div class="group-title">月度预算</div>' +
       '<input class="input input--num" data-role="budget" data-autofocus inputmode="decimal" value="' +
-        (budgetCents() ? (budgetCents() / 100).toFixed(2) : '') + '" placeholder="0.00">' +
+        (DB.settings.budget ? (DB.settings.budget / 100).toFixed(2) : '') + '" placeholder="0.00">' +
       '<p style="font-size:12.5px;color:var(--ink-3);margin:10px 0 0;line-height:1.6">' +
       '设置后，首页会按当月支出显示进度。留空或填 0 表示不启用。' +
       '预算只作用于当前账本。</p>';
@@ -1032,6 +1054,87 @@
     return panelShell('关于', body);
   }
 
+  /* ---------- 自动备份 ----------
+     每天第一次数据变更后自动留一份 JSON：
+     安卓上写入系统「下载」目录（文件名带日期，一天至多一份）；
+     所有平台都在本机存快照环（最近 7 天，超大时跳过以免撑爆配额）。
+     iOS / 网页受浏览器限制无法后台静默写文件，快照照留，
+     文件请用「立即备份一份」手动落到「文件」App。 */
+  var AUTO_KEY = 'mozhang.autosave';
+  var autoTimer = 0;
+  function scheduleAutoSave() {
+    if (!DB || !DB.settings.autoSave) return;
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(function () { autoSaveIfDue(false); }, 6000);
+  }
+  function autoSaveIfDue(force) {
+    if (!DB) return;
+    if (!DB.settings.autoSave && !force) return;
+    var d = today();
+    /* 今天的文件已经写过：不再重复下载，但本机快照随改动刷新到最新，
+       免得当天晚些时候误删，只能恢复到当天第一笔。 */
+    if (DB.settings.lastAutoSave === d) { if (dirty) saveSnapshot(); return; }
+    /* 网页可能开着多个标签页：本页没改过数据时不回写磁盘，
+       防止陈旧标签页在隐藏/关闭时覆盖别的标签页刚记的账。 */
+    if (!force && !dirty) return;
+    writeAutoBackup();
+  }
+  function readAutoBackups() {
+    try { return JSON.parse(localStorage.getItem(AUTO_KEY) || '[]'); } catch (e) { return []; }
+  }
+  function saveSnapshot() {
+    var json = JSON.stringify(DB), d = today();
+    try {
+      var arr = readAutoBackups().filter(function (x) { return x.d !== d; });
+      if (json.length <= 400000) arr.push({ d: d, j: json });
+      while (arr.length > 7) arr.shift();
+      localStorage.setItem(AUTO_KEY, JSON.stringify(arr));
+    } catch (e) { /* 配额不够就只留文件备份 */ }
+  }
+  function writeAutoBackup() {
+    saveSnapshot();
+    var d = today();
+    try {
+      if (window.Android && window.Android.saveFile) {
+        window.Android.saveFile('记账本自动备份-' + d + '.json', 'application/json', JSON.stringify(DB));
+      }
+    } catch (e) { /* 非安卓环境 */ }
+    DB.settings.lastAutoSave = d;
+    save();
+  }
+  function isAppleWeb() {
+    var ua = navigator.userAgent || '';
+    return /iPhone|iPad|iPod/.test(ua) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+  function panelAutoBackup() {
+    var s = DB.settings;
+    var snaps = readAutoBackups().slice().reverse();   // 新的排前面
+    var explain;
+    if (window.Android && window.Android.saveFile) {
+      explain = '开启后，每天第一次记账或改动数据，会自动把备份写进系统「下载」目录（文件名带日期），同时在应用内保留最近 7 天的快照。';
+    } else if (isAppleWeb()) {
+      explain = 'iPhone / iPad 上系统不允许网页在后台自动写文件，所以自动备份只在本机留快照（最近 7 天）。想要文件的话，点下面的「立即备份一份」，Safari 会把它存进「文件」App。';
+    } else {
+      explain = '网页版每天自动在本机留一份快照（最近 7 天）；点「立即备份一份」可把 JSON 文件下载到本地。安卓安装版还会每天自动写进系统「下载」目录。';
+    }
+    var body = '<div class="item"><span class="il"><span class="iname">自动备份</span>' +
+      '<span class="isub">每天第一次改动后自动留一份</span></span>' +
+      '<span class="seg-mini"><button data-act="autosave-toggle" data-v="1" class="' + (s.autoSave ? 'is-on' : '') + '">开</button>' +
+      '<button data-act="autosave-toggle" data-v="0" class="' + (!s.autoSave ? 'is-on' : '') + '">关</button></span></div>' +
+      '<p style="font-size:12.5px;color:var(--ink-3);line-height:1.7;margin:10px 0 0">' + explain +
+      '快照只在误删、误清后用来找回数据，不影响当前账目。</p>' +
+      '<div class="group-title" style="margin-top:20px">本机快照</div>' +
+      (snaps.length ? snaps.map(function (x, i) {
+        var n = 0; try { n = (JSON.parse(x.j).txns || []).length; } catch (e) { /* 损坏的跳过计数 */ }
+        return '<div class="item"><span class="il"><span class="iname">' + esc(x.d) + '</span>' +
+          '<span class="isub">' + n + ' 笔 · 约 ' + Math.ceil(x.j.length / 1024) + ' KB</span></span>' +
+          '<button class="btn btn--ghost" style="height:32px;padding:0 12px" data-act="autosave-restore" data-i="' + (snaps.length - 1 - i) + '">恢复</button></div>';
+      }).join('') : '<div class="item"><span class="il"><span class="isub">还没有快照，改一笔数据或点「立即备份」就会生成。</span></span></div>');
+    return panelShell('自动备份', body,
+      '<button class="btn btn--primary btn--block" data-act="autosave-now">' + ICON('download', 17) + '立即备份一份</button>');
+  }
+
   /* ---------- 数据导入导出 ---------- */
   function download(name, mime, text) {
     try {
@@ -1078,12 +1181,12 @@
       var rd = new FileReader();
       rd.onload = function () {
         try {
-          /* 和启动时走同一条补齐路径：少字段的备份也能恢复，而不是把界面搞崩 */
-          DB = normalizeData(JSON.parse(rd.result));
-          saveOrWarn(); applyTheme();
+          var d = JSON.parse(rd.result);
+          if (!d || !Array.isArray(d.categories) || !Array.isArray(d.txns)) throw new Error('格式不符');
+          DB = normalizeDB(d); commit(); applyTheme(); applyFont();
           UI.month = mk(today()); UI.tab = 'home';
           closePanel(); render();
-          toast('已恢复 ' + DB.txns.length + ' 笔记录');
+          toast('已恢复 ' + d.txns.length + ' 笔记录');
         } catch (e) { toast('文件无法识别：' + e.message); }
       };
       rd.readAsText(f);
@@ -1141,13 +1244,12 @@
       ['income', '兼职', 450, '微信', '兼职收入', 15]
     ];
     prev.forEach(function (p) { push(p[0], p[1], p[2], p[3], p[4], p[5] + 31); });
-    var al = activeLedgerObj();
-    if (al && !al.budget) al.budget = 150000;
+    DB.settings.budget = DB.settings.budget || 150000;
     DB.accounts[0].initial = 20000;
     DB.accounts[1].initial = 30000;
     DB.accounts[2].initial = 45000;
     DB.accounts[3].initial = 260000;
-    save();
+    commit();
   }
 
   /* ---------- 事件 ---------- */
@@ -1242,7 +1344,7 @@
         UI.draft.category = t.getAttribute('data-id'); render(); break;
       case 'key': keyPress(t.getAttribute('data-k')); break;
       case 'key-back': keyBack(); break;
-      case 'key-clear': UI.draft.amountStr = ''; render(); break;
+      case 'key-clear': UI.draft.amountStr = ''; refreshAmount(); break;
       case 'pick-account':
         openPicker('account', { target: t.getAttribute('data-target') });
         break;
@@ -1267,39 +1369,77 @@
         var id = t.getAttribute('data-id');
         confirmBox('删除这笔记录？', '删除后无法撤销。', '删除', function () {
           DB.txns = DB.txns.filter(function (x) { return x.id !== id; });
-          save(); closePanel(); toast('已删除');
+          commit(); closePanel(); toast('已删除');
         }, true);
         break;
       case 'theme':
-        DB.settings.theme = t.getAttribute('data-v'); save(); applyTheme(); render(); break;
+        DB.settings.theme = t.getAttribute('data-v'); commit(); applyTheme(); render(); break;
+      case 'accent':
+        DB.settings.accent = t.getAttribute('data-v'); commit(); applyTheme(); render(); break;
+      case 'font':
+        DB.settings.font = t.getAttribute('data-v'); commit(); applyFont(); render(); break;
+      case 'fontscale':
+        DB.settings.fontScale = +t.getAttribute('data-v'); commit(); applyFont(); render(); break;
+      case 'autosave-toggle':
+        DB.settings.autoSave = t.getAttribute('data-v') === '1';
+        save(); render();
+        toast(DB.settings.autoSave ? '自动备份已开启' : '自动备份已关闭');
+        break;
+      case 'autosave-now': {
+        if (window.Android && window.Android.saveFile) {
+          /* 安卓：与自动备份同路——写入「下载」+ 本机快照，原生侧自带提示 */
+          writeAutoBackup();
+        } else {
+          /* 网页 / iOS：点一下就把文件交给你（Safari 会存进「下载」或「文件」） */
+          saveSnapshot();
+          DB.settings.lastAutoSave = today(); save();
+          var ok = download('记账本备份-' + today() + '.json', 'application/json', JSON.stringify(DB, null, 2));
+          toast(ok ? '已保存备份文件' : '导出失败');
+        }
+        renderPanel();
+        break;
+      }
+      case 'autosave-restore': {
+        var snap = readAutoBackups()[+t.getAttribute('data-i')];
+        if (!snap) break;
+        confirmBox('恢复这份快照？', '当前数据会被 ' + snap.d + ' 的快照整体替换。', '恢复', function () {
+          try {
+            DB = normalizeDB(JSON.parse(snap.j));
+            commit(); applyTheme(); applyFont();
+            UI.month = mk(today()); UI.tab = 'home';
+            closePanel(); render();
+            toast('已恢复到 ' + snap.d + ' 的快照');
+          } catch (e) { toast('快照已损坏，无法恢复'); }
+        }, true);
+        break;
+      }
       case 'currency':
-        DB.settings.currency = t.getAttribute('data-v'); save(); render(); break;
+        DB.settings.currency = t.getAttribute('data-v'); commit(); render(); break;
       case 'ledger-add': {
         var inp = ov.querySelector('[data-role="new-ledger"]');
         var nm2 = (inp && inp.value || '').trim();
         if (!nm2) { toast('请输入账本名称'); break; }
-        var nl = { id: 'ld' + uid(), name: nm2, budget: 0 };
-        DB.ledgers.push(nl); DB.currentLedger = nl.id; save(); closePanel(); render(); toast('已创建「' + nm2 + '」');
+        var nl = { id: 'ld' + uid(), name: nm2 };
+        DB.ledgers.push(nl); DB.currentLedger = nl.id; commit(); closePanel(); render(); toast('已创建「' + nm2 + '」');
         break;
       }
       case 'switch-ledger':
-        DB.currentLedger = t.getAttribute('data-id'); save(); closePanel(); render(); break;
+        DB.currentLedger = t.getAttribute('data-id'); commit(); closePanel(); render(); break;
       case 'del-ledger': {
         var lid = t.getAttribute('data-id');
         confirmBox('删除账本？', '该账本下的所有记录都会被一并删除，无法撤销。', '删除', function () {
           DB.txns = DB.txns.filter(function (x) { return (x.ledger || 'ld1') !== lid; });
           DB.ledgers = DB.ledgers.filter(function (l) { return l.id !== lid; });
           if (DB.currentLedger === lid) DB.currentLedger = DB.ledgers[0].id;
-          save(); closePanel(); render();
+          commit(); closePanel(); render();
         }, true);
         break;
       }
       case 'budget-save': {
         var bi = ov.querySelector('[data-role="budget"]');
         var v = parseFloat((bi.value || '').replace(/[^0-9.]/g, ''));
-        var cents = isNaN(v) ? 0 : Math.round(v * 100);
-        activeLedgerObj().budget = cents;
-        saveOrWarn(); closePanel(); toast(cents ? '预算已保存' : '已关闭预算'); break;
+        DB.settings.budget = isNaN(v) ? 0 : Math.round(v * 100);
+        commit(); closePanel(); toast(DB.settings.budget ? '预算已保存' : '已关闭预算'); break;
       }
       case 'acct-new':
         UI.acctDraft = { id: null, name: '', type: '储蓄卡', icon: 'bank', color: PALETTE[0], initial: 0 };
@@ -1323,13 +1463,13 @@
         } else {
           DB.accounts.push({ id: 'a' + uid(), name: na, type: UI.acctDraft.type, icon: UI.acctDraft.icon, color: UI.acctDraft.color, initial: init });
         }
-        save(); closePanel(); toast('已保存'); break;
+        commit(); closePanel(); toast('已保存'); break;
       }
       case 'acct-del': {
         var aid = t.getAttribute('data-id');
         confirmBox('删除账户？', '使用该账户的记录会保留，但账户名会显示为「未知账户」。', '删除', function () {
           DB.accounts = DB.accounts.filter(function (x) { return x.id !== aid; });
-          save(); closePanel(); render();
+          commit(); closePanel(); render();
         }, true);
         break;
       }
@@ -1353,13 +1493,13 @@
         } else {
           DB.categories.push({ id: 'c' + uid(), name: cn, kind: UI.catDraft.kind, icon: UI.catDraft.icon, color: UI.catDraft.color, order: DB.categories.length });
         }
-        save(); closePanel(); toast('已保存'); break;
+        commit(); closePanel(); toast('已保存'); break;
       }
       case 'cat-del': {
         var cid2 = t.getAttribute('data-id');
         confirmBox('删除分类？', '已使用该分类的记录会保留，但会显示为「未分类」。', '删除', function () {
           DB.categories = DB.categories.filter(function (x) { return x.id !== cid2; });
-          save(); closePanel(); render();
+          commit(); closePanel(); render();
         }, true);
         break;
       }
@@ -1367,17 +1507,37 @@
       case 'export-json': exportJSON(); break;
       case 'import': importJSON(); break;
       case 'demo':
-        confirmBox('载入示例数据？',
-          '这会清除所有账本的记录，并改写各账户的初始余额与当前账本的预算。建议先导出备份。',
-          '载入', function () {
+        confirmBox('载入示例数据？', '这会清除当前所有记录，并填入一批演示账目。建议先导出备份。', '载入', function () {
           seedDemo(); UI.month = mk(today()); render(); toast('已载入示例数据');
         }, true);
         break;
       case 'clear-txns':
         confirmBox('清空所有流水？', '全部记录将被删除，分类和账户会保留。此操作不可撤销。', '清空', function () {
-          DB.txns = []; save(); render(); toast('已清空');
+          DB.txns = []; commit(); render(); toast('已清空');
         }, true);
         break;
+    }
+  }
+  /* 键盘是高频操作：只更新金额区，不整版重渲染，低配机上也跟手 */
+  function refreshAmount() {
+    var line = document.querySelector('.amount-line');
+    if (!line || !UI.draft) { render(); return; }
+    var d = UI.draft;
+    var span = line.querySelector('.amt-str');
+    if (d.amountStr) {
+      if (!span) {
+        span = document.createElement('span');
+        span.className = 'amt-str';
+        line.insertBefore(span, line.querySelector('.caret'));
+      }
+      span.textContent = d.amountStr;
+    } else if (span) span.remove();
+    var hint = document.querySelector('.amount-hint');
+    if (hint) {
+      hint.textContent = d.amountStr
+        ? (d.typeDraft === 'transfer' ? '账户之间转移，不计入收支'
+          : d.typeDraft === 'income' ? '记一笔收入' : '记一笔支出')
+        : '输入金额';
     }
   }
   function keyPress(k) {
@@ -1390,11 +1550,11 @@
       s += k;
     }
     UI.draft.amountStr = s;
-    render();
+    refreshAmount();
   }
   function keyBack() {
     UI.draft.amountStr = UI.draft.amountStr.slice(0, -1);
-    render();
+    refreshAmount();
   }
   function saveDraft() {
     var d = UI.draft;
@@ -1414,21 +1574,16 @@
       toAccount: d.typeDraft === 'transfer' ? d.toAccount : null,
       date: d.date, time: d.time || nowTime(), note: (d.note || '').trim()
     };
-    var isNew = !d.id;
     if (d.id) {
       var old = DB.txns.filter(function (x) { return x.id === d.id; })[0];
       if (old) { for (var k in rec) old[k] = rec[k]; }
     } else {
       rec.id = uid(); rec.createdAt = Date.now(); DB.txns.push(rec);
     }
-    if (!saveOrWarn()) {
-      /* 写不进存储就把这笔撤掉，面板留着不关 —— 先让人把备份导出来 */
-      if (isNew) DB.txns = DB.txns.filter(function (x) { return x.id !== rec.id; });
-      return;
-    }
+    commit();
     UI.month = mk(d.date);
     closePanel();
-    toast(isNew ? '已记入账簿' : '已更新');
+    toast(d.id ? '已更新' : '已记入账簿');
   }
 
   /* ---------- 输入事件 ---------- */
@@ -1438,11 +1593,9 @@
     if (role === 'note') UI.draft.note = t.value;
     else if (role === 'search') {
       UI.search = t.value;
-      /* 只替换结果列表，不能重建整个面板 —— 那会把正在组词的输入框一起销毁，
-         中文输入法的拼音候选就断了。 */
+      /* 只替换结果区，输入框不动，焦点与光标自然保留 */
       var box = document.getElementById('search-results');
       if (box) box.innerHTML = searchResultsHtml();
-      else render();
     }
   }
 
@@ -1467,18 +1620,12 @@
     document.addEventListener('input', handleInput, false);
     document.addEventListener('keydown', function (e) {
       if (UI.panel !== 'compose') return;
-      if (e.key === 'Escape') { closePanel(); return; }
-      /* 焦点在输入框里时按键归输入框。以前只看退格、漏了数字，
-         结果在备注里打「买3斤苹果」会把 3 记进金额。 */
-      var el = document.activeElement;
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
-        if (e.key === 'Enter') saveDraft();
-        return;
-      }
-      if (/^[0-9]$/.test(e.key)) { keyPress(e.key); }
-      else if (e.key === '.') keyPress('.');
-      else if (e.key === 'Backspace') { keyBack(); e.preventDefault(); }
+      var inField = document.activeElement && document.activeElement.tagName === 'INPUT';
+      if (/^[0-9]$/.test(e.key)) { if (!inField) keyPress(e.key); }
+      else if (e.key === '.') { if (!inField) keyPress('.'); }
+      else if (e.key === 'Backspace' && !inField) { keyBack(); e.preventDefault(); }
       else if (e.key === 'Enter') saveDraft();
+      else if (e.key === 'Escape') closePanel();
     });
     if (window.matchMedia) {
       var mq = window.matchMedia('(prefers-color-scheme: dark)');
@@ -1488,6 +1635,21 @@
     v.addEventListener('scroll', function () {
       document.getElementById('topbar').classList.toggle('is-stuck', v.scrollTop > 6);
     }, { passive: true });
+    /* 多标签页：别的标签页改了数据就刷新本页，避免内存里的旧数据覆盖磁盘。
+       正在记账面板里输入时先不打断，只提醒一句。 */
+    window.addEventListener('storage', function (e) {
+      if (e.key !== KEY) return;
+      if (UI.panel === 'compose' && UI.draft && (UI.draft.amountStr || UI.draft.note)) {
+        toast('数据已在其他窗口更新，保存这笔后请手动刷新');
+        return;
+      }
+      location.reload();
+    });
+    /* 切到后台 / 关闭页面前，把当天还没备份的变更落一份 */
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) autoSaveIfDue(false);
+    });
+    window.addEventListener('pagehide', function () { autoSaveIfDue(false); });
     // 安卓把状态栏/导航栏高度注入 CSS 变量
     try {
       if (window.Android && window.Android.insets) {
@@ -1499,11 +1661,12 @@
     } catch (e) { /* 浏览器环境 */ }
   }
 
-  var APP_VERSION = '1.0.0';
+  var APP_VERSION = '1.2.2';
 
   function boot() {
-    var ok = load();
+    load();
     applyTheme();
+    applyFont();
     bind();
     var m = /[?&]month=([\d-]+)/.exec(location.search);
     if (m) UI.month = m[1];
@@ -1512,7 +1675,6 @@
     var tab = /[?&]tab=(\w+)/.exec(location.search);
     if (tab) UI.tab = tab[1];
     render();
-    if (!ok) toast('上次的数据读不出来，已用空白账本启动，建议从备份恢复');
     setupWebApp();
   }
   /* 网页版（PWA）的事：注册离线缓存；安卓外壳里则相反，把用不到的引用摘掉。
